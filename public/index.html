@@ -1,0 +1,361 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+<meta charset="UTF-8">
+<title>Silkroad: Qi Ball Online Arena</title>
+<script src="/socket.io/socket.io.js"></script>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: #0b0d13;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    min-height: 100vh;
+    font-family: 'Segoe UI', Tahoma, sans-serif;
+    color: #fff;
+    user-select: none;
+  }
+  #game-container {
+    position: relative;
+    border: 3px solid #d4af37;
+    border-radius: 10px;
+    box-shadow: 0 0 40px rgba(212, 175, 55, 0.25);
+    background: #000;
+    overflow: hidden;
+  }
+  canvas { display: block; }
+  .hud {
+    position: absolute;
+    top: 15px;
+    left: 40px;
+    right: 40px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    pointer-events: none;
+  }
+  .score-card {
+    font-size: 42px;
+    font-weight: 900;
+    display: flex;
+    align-items: center;
+    gap: 15px;
+  }
+  .p1-name { color: #9b59b6; font-size: 18px; font-weight: 800; }
+  .p2-name { color: #e67e22; font-size: 18px; font-weight: 800; }
+  .rally-info {
+    font-size: 18px;
+    font-weight: 800;
+    color: #f1c40f;
+    letter-spacing: 1px;
+  }
+  #role-banner {
+    position: absolute;
+    bottom: 15px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: rgba(0,0,0,0.75);
+    padding: 6px 16px;
+    border-radius: 20px;
+    border: 1px solid #d4af37;
+    font-weight: 800;
+    font-size: 14px;
+    letter-spacing: 1px;
+  }
+  #controls-info {
+    margin-top: 14px;
+    display: flex;
+    gap: 25px;
+    font-size: 13px;
+    background: #151821;
+    border: 1px solid #282f42;
+    padding: 10px 24px;
+    border-radius: 8px;
+  }
+  .key { background: #2f3542; padding: 2px 7px; border-radius: 4px; border: 1px solid #4a5162; font-weight: bold; }
+</style>
+</head>
+<body>
+
+<div id="game-container">
+  <div class="hud">
+    <div class="score-card">
+      <span class="p1-name">THIEF (P1)</span>
+      <span id="p1-score" style="color:#9b59b6;">0</span>
+    </div>
+    <div class="rally-info" id="rally-counter">RALLY: 0 | HIZ: x1.0</div>
+    <div class="score-card">
+      <span id="p2-score" style="color:#e67e22;">0</span>
+      <span class="p2-name">SAMURAI (P2)</span>
+    </div>
+  </div>
+  <div id="role-banner">BAĞLANILIYOR...</div>
+  <canvas id="gameCanvas" width="960" height="520"></canvas>
+</div>
+
+<div id="controls-info">
+  <div>
+    <strong>Kontroller:</strong> <span class="key">A</span> / <span class="key">D</span> Koş | <span class="key">W</span> Zıpla | <span class="key">F</span> <strong>Aşırtma Şut</strong> | <span class="key">G</span> <strong>Roket Şut</strong>
+  </div>
+</div>
+
+<script>
+const socket = io();
+
+const thiefIdleImg = new Image(); thiefIdleImg.src = "thief_body.png";
+const thiefAttackImg = new Image(); thiefAttackImg.src = "thief_sword.png";
+const samuraiImg = new Image(); samuraiImg.src = "samurai.png";
+
+const canvas = document.getElementById("gameCanvas");
+const ctx = canvas.getContext("2d");
+
+const groundY = 440;
+const goalTop = 170;
+const goalBottom = 330;
+const goalWidth = 14;
+
+let myRole = 'spectator';
+let gameState = { players: {}, ball: { x: 480, y: 160, radius: 14 } };
+let particles = [];
+let slashes = [];
+let ballTrail = [];
+let screenShake = 0;
+
+// Sesler
+const AudioContext = window.AudioContext || window.webkitAudioContext;
+let audioCtx = null;
+function initAudio() {
+  if (!audioCtx) audioCtx = new AudioContext();
+  if (audioCtx.state === 'suspended') audioCtx.resume();
+}
+
+function playTone(freq, dur, type="sine") {
+  initAudio();
+  if (!audioCtx) return;
+  try {
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.type = type;
+    osc.frequency.setValueAtTime(freq, audioCtx.currentTime);
+    osc.frequency.exponentialRampToValueAtTime(30, audioCtx.currentTime + dur);
+    gain.gain.setValueAtTime(0.3, audioCtx.currentTime);
+    gain.gain.linearRampToValueAtTime(0.01, audioCtx.currentTime + dur);
+    osc.connect(gain);
+    gain.connect(audioCtx.destination);
+    osc.start();
+    osc.stop(audioCtx.currentTime + dur);
+  } catch(e) {}
+}
+
+socket.on('roleAssigned', (data) => {
+  myRole = data.role;
+  const banner = document.getElementById('role-banner');
+  if (myRole === 'thief') {
+    banner.innerText = "SEN THIEF (P1) KARAKTERİSİN";
+    banner.style.color = "#9b59b6";
+  } else if (myRole === 'samurai') {
+    banner.innerText = "SEN SAMURAI (P2) KARAKTERİSİN";
+    banner.style.color = "#e67e22";
+  } else {
+    banner.innerText = "İZLEYİCİ MODU (Oda Dolu)";
+    banner.style.color = "#f1c40f";
+  }
+});
+
+socket.on('gameState', (data) => {
+  gameState = data;
+  if (gameState.ball) {
+    ballTrail.push({ x: gameState.ball.x, y: gameState.ball.y, color: gameState.ball.lastHitter === 'thief' ? '#9b59b6' : '#e67e22' });
+    if (ballTrail.length > 8) ballTrail.shift();
+  }
+});
+
+socket.on('scoreUpdate', (data) => {
+  document.getElementById('p1-score').innerText = data.p1Score;
+  document.getElementById('p2-score').innerText = data.p2Score;
+  document.getElementById('rally-counter').innerText = `RALLY: ${data.rallyCount} | HIZ: x${data.speedMultiplier.toFixed(1)}`;
+});
+
+socket.on('playerSwing', (data) => {
+  playTone(data.swingType === 'flat' ? 620 : 320, 0.15, "sawtooth");
+});
+
+socket.on('ballHit', (data) => {
+  screenShake = data.swingType === 'flat' ? 7 : 4;
+  playTone(data.swingType === 'flat' ? 750 : 440, 0.2, "sine");
+  createSparks(data.x, data.y, data.swingType === 'flat' ? '#ff0055' : '#00ffff', 12);
+  document.getElementById('rally-counter').innerText = `RALLY: ${data.rallyCount} | HIZ: x${data.speedMultiplier.toFixed(1)}`;
+});
+
+socket.on('wallBounce', (data) => {
+  createSparks(data.x, data.y, "#ffd32a", 6);
+  playTone(200, 0.1, "triangle");
+});
+
+socket.on('goalScored', (data) => {
+  screenShake = 14;
+  playTone(180, 0.5, "triangle");
+});
+
+function createSparks(x, y, color, count = 8) {
+  for (let i = 0; i < count; i++) {
+    particles.push({
+      x, y,
+      vx: (Math.random() - 0.5) * 10,
+      vy: (Math.random() - 0.5) * 10,
+      life: 14,
+      color
+    });
+  }
+}
+
+// Klavye Girişlerini Gönderme
+const keys = {};
+window.addEventListener('keydown', (e) => {
+  keys[e.key.toLowerCase()] = true;
+  if (e.key.toLowerCase() === 'f') sendInput(true, 'high');
+  if (e.key.toLowerCase() === 'g') sendInput(true, 'flat');
+});
+window.addEventListener('keyup', (e) => {
+  keys[e.key.toLowerCase()] = false;
+});
+
+function sendInput(isSwing = false, swingType = null) {
+  socket.emit('playerInput', {
+    left: !!keys['a'],
+    right: !!keys['d'],
+    jump: !!keys['w'],
+    swing: isSwing,
+    swingType: swingType
+  });
+}
+
+setInterval(() => {
+  if (myRole !== 'spectator') {
+    sendInput(false);
+  }
+}, 1000 / 60);
+
+function drawCourt() {
+  const bgGrad = ctx.createLinearGradient(0, 0, 0, canvas.height);
+  bgGrad.addColorStop(0, '#0a0d14');
+  bgGrad.addColorStop(0.7, '#161c28');
+  bgGrad.addColorStop(1, '#2c1e1e');
+  ctx.fillStyle = bgGrad;
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  ctx.fillStyle = "#fff8db";
+  ctx.beginPath();
+  ctx.arc(canvas.width / 2, 90, 36, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.fillStyle = "#11141a";
+  ctx.fillRect(0, groundY, canvas.width, canvas.height - groundY);
+  ctx.fillStyle = "#d4af37";
+  ctx.fillRect(0, groundY, canvas.width, 6);
+
+  // Sol Duvar ve Kale
+  ctx.fillStyle = "#4a5568";
+  ctx.fillRect(0, 0, goalWidth, goalTop);
+  ctx.fillRect(0, goalBottom, goalWidth, groundY - goalBottom);
+  ctx.strokeStyle = "#9b59b6";
+  ctx.lineWidth = 4;
+  ctx.strokeRect(0, goalTop, goalWidth, goalBottom - goalTop);
+
+  // Sağ Duvar ve Kale
+  ctx.fillRect(canvas.width - goalWidth, 0, goalWidth, goalTop);
+  ctx.fillRect(canvas.width - goalWidth, goalBottom, goalWidth, groundY - goalBottom);
+  ctx.strokeStyle = "#e67e22";
+  ctx.strokeRect(canvas.width - goalWidth, goalTop, goalWidth, goalBottom - goalTop);
+}
+
+function render() {
+  ctx.save();
+  if (screenShake > 0) {
+    ctx.translate((Math.random() - 0.5) * screenShake, (Math.random() - 0.5) * screenShake);
+    screenShake--;
+  }
+
+  drawCourt();
+
+  // Oyuncuları Çiz
+  for (const id in gameState.players) {
+    const p = gameState.players[id];
+    if (p.type === 'spectator') continue;
+
+    ctx.save();
+    if (p.type === 'samurai') {
+      ctx.translate(p.x + p.width, p.y);
+      ctx.scale(-1, 1);
+    } else {
+      ctx.translate(p.x, p.y);
+    }
+
+    if (p.type === 'thief') {
+      const img = p.isSwinging ? (thiefAttackImg.width > 0 ? thiefAttackImg : thiefIdleImg) : thiefIdleImg;
+      if (img.width > 0) {
+        ctx.drawImage(img, -20, -35, p.width + 40, p.height + 40);
+      } else {
+        ctx.fillStyle = "#9b59b6";
+        ctx.fillRect(0, 0, p.width, p.height);
+      }
+    } else {
+      if (samuraiImg.width > 0) {
+        ctx.drawImage(samuraiImg, -20, -35, p.width + 40, p.height + 40);
+      } else {
+        ctx.fillStyle = "#e67e22";
+        ctx.fillRect(0, 0, p.width, p.height);
+      }
+    }
+    ctx.restore();
+  }
+
+  // Top ve Işık İzi
+  for (let i = 0; i < ballTrail.length; i++) {
+    const t = ballTrail[i];
+    const alpha = (i + 1) / ballTrail.length;
+    ctx.save();
+    ctx.fillStyle = t.color;
+    ctx.globalAlpha = alpha * 0.45;
+    ctx.beginPath();
+    ctx.arc(t.x, t.y, 14 * alpha, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
+
+  if (gameState.ball) {
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(gameState.ball.x, gameState.ball.y, 14, 0, Math.PI * 2);
+    ctx.fillStyle = gameState.ball.lastHitter === 'thief' ? '#d980fa' : (gameState.ball.lastHitter === 'samurai' ? '#ff9f43' : '#f1c40f');
+    ctx.shadowBlur = 18;
+    ctx.shadowColor = ctx.fillStyle;
+    ctx.fill();
+
+    ctx.beginPath();
+    ctx.arc(gameState.ball.x, gameState.ball.y, 7, 0, Math.PI * 2);
+    ctx.fillStyle = "#ffffff";
+    ctx.fill();
+    ctx.restore();
+  }
+
+  // Parçacıklar
+  particles = particles.filter(p => p.life > 0);
+  particles.forEach(p => {
+    p.x += p.vx;
+    p.y += p.vy;
+    p.life--;
+    ctx.fillStyle = p.color;
+    ctx.fillRect(p.x, p.y, 3, 3);
+  });
+
+  ctx.restore();
+  requestAnimationFrame(render);
+}
+
+requestAnimationFrame(render);
+</script>
+</body>
+</html>
