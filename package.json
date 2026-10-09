@@ -1,0 +1,13 @@
+{
+  "name": "silkroad-qi-ball-online",
+  "version": "1.0.0",
+  "description": "Silkroad Qi Ball Multiplayer",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "socket.io": "^4.7.5"
+  }
+}
